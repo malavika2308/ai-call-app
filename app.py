@@ -1,48 +1,65 @@
-from flask import Flask, request, Response
-from twilio.rest import Client
-from twilio.twiml.voice_response import VoiceResponse, Say, Record
 import os
+from flask import Flask, request, render_template, jsonify
+from twilio.rest import Client
+from twilio.twiml.voice_response import VoiceResponse
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 
-# Twilio credentials (store securely in env vars in production)
-account_sid = os.environ.get("account_sid ")
-auth_token = os.environ.get("auth_token ")
-twilio_number =os.environ.get("twilio_number")
+
+# Load env vars
+account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_number = os.getenv("TWILIO_NUMBER")
+target_number = os.getenv("TARGET_PHONE_NUMBER")
+base_url = os.getenv("BASE_URL")
+
+
 client = Client(account_sid, auth_token)
 
-# Route to make the call
-@app.route('/make_call', methods=['GET'])
+# Store the last transcript in memory or a simple file
+TRANSCRIPT_FILE = "last_transcript.txt"
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+@app.route("/make_call", methods=["POST"])
 def make_call():
     call = client.calls.create(
-        to='+916304102437',  # Replace with the recipient's number
+        to=target_number,
         from_=twilio_number,
-        url='https://ai-call-app.com/voice'  # This URL must be publicly accessible
+        url=f"{base_url}/voice"
     )
-    return f"Call initiated. SID: {call.sid}"
+    return jsonify({"status": "calling", "sid": call.sid})
 
-# What Twilio does when the call connects
-@app.route('/voice', methods=['POST'])
+@app.route("/voice", methods=["POST"])
 def voice():
     response = VoiceResponse()
-    response.say("Hello! This is your AI assistant. Please tell me what's on your mind after the beep.", voice='Polly.Joanna')
-    response.record(max_length=15, action='/process_recording', transcribe=True, transcribe_callback='/transcription')
-    return Response(str(response), mimetype='application/xml')
+    response.say("Hi, this is your AI assistant. Please speak after the beep.", voice='alice')
+    response.record(
+        action="/process_recording",
+        transcribe=True,
+        transcribe_callback="/transcription",
+        max_length=10
+    )
+    return str(response)
 
-# Handle transcription
-@app.route('/transcription', methods=['POST'])
+@app.route("/transcription", methods=["POST"])
 def transcription():
-    transcript = request.form.get('TranscriptionText')
-    print("User said:", transcript)  # You can return this or log it
-    return '', 204
+    transcript = request.form.get("TranscriptionText", "")
+    with open(TRANSCRIPT_FILE, "w") as f:
+        f.write(transcript)
+    return "", 204
 
-# After recording finishes
-@app.route('/process_recording', methods=['POST'])
-def process_recording():
-    response = VoiceResponse()
-    response.say("Thanks! Your response has been recorded. Goodbye.")
-    response.hangup()
-    return Response(str(response), mimetype='application/xml')
-
-if __name__ == '__main__':
-    app.run()
+@app.route("/get_transcript", methods=["GET"])
+def get_transcript():
+    try:
+        with open(TRANSCRIPT_FILE, "r") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = "No transcript available yet."
+    return jsonify({"transcript": text})
+if __name__ == "__main__":
+    app.run(debug=True)
