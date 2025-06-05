@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Calling App</title>
+</head>
+<body>
+    <h1>AI Calling App</h1>
+    <button onclick="startCall()">Start AI Call</button>
+    <p id="status">Press the button to start the call.</p>
+    <h2>Transcript:</h2>
+    <div id="transcript">Waiting for the call...</div>
+
+    <script>
+        function startCall() {
+            fetch("/make_call", { method: "POST" })
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById("status").innerText = "Calling...";
+                    pollTranscript();
+                });
+        }
+
+        function pollTranscript() {
+            // Check every 5 seconds for the transcript
+            const interval = setInterval(() => {
+                fetch("/get_transcript")
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.transcript && data.transcript !== "No transcript available yet.") {
+                            document.getElementById("transcript").innerText = data.transcript;
+                            clearInterval(interval);
+                        }
+                    });
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
