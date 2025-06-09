@@ -1,23 +1,29 @@
 import os
-from flask import Flask, request, render_template, jsonify
+import requests
+from flask import Flask, request, jsonify, render_template
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 app = Flask(__name__)
 
-# Load environment variables
-account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+# Twilio setup
+twilio_client = Client(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
 twilio_number = os.getenv("TWILIO_NUMBER")
 target_number = os.getenv("TARGET_PHONE_NUMBER")
 base_url = os.getenv("BASE_URL")
 
-client = Client(account_sid, auth_token)
+# OpenAI setup
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Simple storage for transcript
-TRANSCRIPT_FILE = "last_transcript.txt"
+# Conversation log file
+CONVERSATION_LOG = "conversation_log.txt"
+
+def append_to_log(speaker, text):
+    with open(CONVERSATION_LOG, "a") as f:
+        f.write(f"{speaker}: {text}\n")
 
 @app.route("/")
 def index():
@@ -25,56 +31,99 @@ def index():
 
 @app.route("/make_call", methods=["POST"])
 def make_call():
-    # Initiates a call from Twilio
-    call = client.calls.create(
+    # Clear previous conversation
+    open(CONVERSATION_LOG, "w").close()
+
+    call = twilio_client.calls.create(
         to=target_number,
         from_=twilio_number,
-        url=f"{base_url}/voice"  # This is what Twilio calls to start
+        url=f"{base_url}/voice"
     )
     return jsonify({"status": "calling", "sid": call.sid})
 
-@app.route("/voice", methods=["POST"])
+@app.route("/voice", methods=["GET", "POST"])
 def voice():
-    # Twilio hits this when the call connects
+    if request.method == "GET":
+        return "This route expects a POST from Twilio.", 405
+
     response = VoiceResponse()
-    response.say("Hi, this is your AI assistant. Please speak after the beep.", voice='alice')
+    response.say("Hi! This is AI4Bazaar. Are you interested in a custom website for your business?", voice="Polly.Joanna")
     response.record(
-        action="/process_recording",  # Twilio will POST here after recording
-        transcribe=True,
-        transcribe_callback="/transcription",
-        max_length=10
+        action="/handle_recording",
+        max_length=10,
+        play_beep=True
     )
     return str(response)
 
-@app.route("/process_recording", methods=["POST"])
-def process_recording():
-    # This was missing before! Twilio expects this.
-    print("✅ Received recording data")
-    return "", 204
+@app.route("/handle_recording", methods=["POST"])
+def handle_recording():
+    recording_url = request.form.get("RecordingUrl")
+    if not recording_url:
+        return "No recording URL received.", 400
 
-@app.route("/transcription", methods=["POST"])
-def transcription():
-    # Twilio sends transcription text here
-    transcript = request.form.get("TranscriptionText", "")
-    print("📝 Transcription received:", transcript)
-    with open(TRANSCRIPT_FILE, "w") as f:
-        f.write(transcript)
-    return "", 204
+    audio_url = f"{recording_url}.wav"
+    audio_file_path = "user_input.wav"
 
-@app.route("/get_transcript", methods=["GET"])
-def get_transcript():
+    # Download the user's voice recording
     try:
-        with open(TRANSCRIPT_FILE, "r") as f:
-            text = f.read()
-    except FileNotFoundError:
-        text = "No transcript available yet."
-    return jsonify({"transcript": text})
+        audio_data = requests.get(audio_url).content
+        with open(audio_file_path, "wb") as f:
+            f.write(audio_data)
+    except Exception as e:
+        return f"Error downloading audio: {str(e)}", 500
 
-# Health check route to test app is running
+    # Transcribe with Whisper
+    try:
+        with open(audio_file_path, "rb") as audio_file:
+            transcript_response = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        user_text = transcript_response.text.strip()
+        append_to_log("User", user_text)
+        print("User said:", user_text)
+    except Exception as e:
+        return f"Transcription error: {str(e)}", 500
+
+    # Generate GPT-4 reply
+    try:
+        gpt_response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are AI4Bazaar, an AI that sells custom websites."},
+                {"role": "user", "content": user_text}
+            ]
+        )
+        ai_reply = gpt_response.choices[0].message.content.strip()
+        append_to_log("AI4Bazaar", ai_reply)
+        print("AI reply:", ai_reply)
+    except Exception as e:
+        return f"GPT-4 error: {str(e)}", 500
+
+    # Respond with AI voice
+    response = VoiceResponse()
+    response.say(ai_reply, voice="Polly.Joanna")
+
+    # Loop back for next input
+    response.record(
+        action="/handle_recording",
+        max_length=10,
+        play_beep=True
+    )
+    return str(response)
+
+@app.route("/conversation", methods=["GET"])
+def conversation():
+    try:
+        with open(CONVERSATION_LOG, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = ["No conversation yet."]
+    return render_template("conversation.html", lines=lines)
+
 @app.route("/health")
 def health():
     return "OK", 200
 
-# Entry point when running locally
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=True, port=5000)
